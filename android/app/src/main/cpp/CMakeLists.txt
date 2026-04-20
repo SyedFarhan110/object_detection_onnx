@@ -15,8 +15,17 @@ add_library(onnxruntime SHARED IMPORTED)
 set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION
         ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libonnxruntime.so)
 
-# Inference source code
+# Inference source code (existing)
 add_library(inference SHARED inference.cpp)
 
 # Link inference with ONNX Runtime and Android log
 target_link_libraries(inference onnxruntime ${log-lib})
+
+# Polygon Validator library (new)
+add_library(polygon_validator SHARED 
+    polygon_validator.cpp
+    polygon_validator.h
+)
+
+# Link polygon_validator with Android log
+target_link_libraries(polygon_validator ${log-lib})
