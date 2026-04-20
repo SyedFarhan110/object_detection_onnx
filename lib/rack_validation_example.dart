@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:object_detection_app/services/polygon_validator_bridge.dart';
-import 'package:object_detection_app/services/ffi_bridge.dart';
+import 'package:object_detection_app/services/inference_bridge.dart';
 
 /// Real-time polygon-based spatial validation for rack detection
 class RackValidationExample extends StatefulWidget {

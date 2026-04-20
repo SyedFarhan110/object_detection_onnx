@@ -5,9 +5,70 @@
 #include <algorithm>
 #include <android/log.h>
 #include <string>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <memory>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "ONNX_INFERENCE", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ONNX_INFERENCE", __VA_ARGS__)
+
+// Frame data structure for the queue
+struct FrameData {
+    std::vector<uint8_t> y_plane;
+    std::vector<uint8_t> u_plane;
+    std::vector<uint8_t> v_plane;
+    int y_row_stride;
+    int uv_row_stride;
+    int uv_pixel_stride;
+    int img_width;
+    int img_height;
+    int64_t timestamp_ms;
+    
+    FrameData() = default;
+    
+    FrameData(const uint8_t* y, const uint8_t* u, const uint8_t* v,
+              int y_stride, int uv_stride, int uv_pixel_stride,
+              int width, int height)
+        : y_row_stride(y_stride)
+        , uv_row_stride(uv_stride)
+        , uv_pixel_stride(uv_pixel_stride)
+        , img_width(width)
+        , img_height(height)
+    {
+        // Copy Y plane
+        size_t y_size = y_stride * height;
+        y_plane.resize(y_size);
+        std::copy(y, y + y_size, y_plane.begin());
+        
+        // Copy U plane
+        size_t uv_height = (height + 1) / 2;
+        size_t u_size = uv_stride * uv_height;
+        u_plane.resize(u_size);
+        std::copy(u, u + u_size, u_plane.begin());
+        
+        // Copy V plane
+        v_plane.resize(u_size);
+        std::copy(v, v + u_size, v_plane.begin());
+        
+        // Timestamp
+        auto now = std::chrono::system_clock::now();
+        timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+    }
+};
+
+// Detection results structure
+struct DetectionResults {
+    std::vector<float> boxes; // Flat array: [x, y, w, h, conf, class_id] * N
+    int count;
+    int64_t timestamp_ms;
+    
+    DetectionResults() : count(0), timestamp_ms(0) {}
+};
 
 struct ModelContext {
     Ort::Env env;
@@ -20,11 +81,34 @@ struct ModelContext {
     std::string output_name_str;
     
     // Frame skipping logic
-    int skip_mode;        // 0 = no skip, 1 = every 2nd frame, 2 = skip N consecutive
-    int skip_count;       // number of frames to skip (for mode 2)
-    int frame_counter;    // internal frame counter
+    int skip_mode;
+    int skip_count;
+    int frame_counter;
     
-    ModelContext(const char* model_path) : env(ORT_LOGGING_LEVEL_WARNING, "ONNXInference"), session(nullptr) {
+    // Producer-Consumer Queue
+    std::queue<FrameData> frame_queue;
+    std::mutex queue_mutex;
+    std::condition_variable queue_cv;
+    int max_queue_size;
+    std::atomic<bool> worker_running;
+    std::thread worker_thread;
+    
+    // Latest detection results (double buffering)
+    DetectionResults latest_results;
+    std::mutex results_mutex;
+    
+    // Statistics
+    std::atomic<int> frames_dropped;
+    std::atomic<int> frames_processed;
+    
+    ModelContext(const char* model_path) 
+        : env(ORT_LOGGING_LEVEL_WARNING, "ONNXInference")
+        , session(nullptr)
+        , max_queue_size(2)
+        , worker_running(false)
+        , frames_dropped(0)
+        , frames_processed(0)
+    {
         Ort::SessionOptions session_options;
         session_options.SetIntraOpNumThreads(2);
         session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -40,7 +124,6 @@ struct ModelContext {
         auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
         input_node_dims = tensor_info.GetShape();
 
-        // Deal with dynamic batch size
         if(input_node_dims[0] < 0) {
             input_node_dims[0] = 1;
         }
@@ -48,14 +131,122 @@ struct ModelContext {
         input_width = input_node_dims[3];
         input_height = input_node_dims[2];
         
-        // Initialize frame skip settings
         skip_mode = 0;
         skip_count = 1;
         frame_counter = 0;
 
         ALOGI("Loaded model. Input [%d,%d,%d,%d]", 
-            (int)input_node_dims[0], (int)input_node_dims[1], (int)input_node_dims[2], (int)input_node_dims[3]);
+            (int)input_node_dims[0], (int)input_node_dims[1], 
+            (int)input_node_dims[2], (int)input_node_dims[3]);
     }
+    
+    ~ModelContext() {
+        // Stop worker if running
+        if (worker_running) {
+            stop_worker();
+        }
+    }
+    
+    void start_worker(int queue_size) {
+        if (worker_running) {
+            ALOGE("Worker already running");
+            return;
+        }
+        
+        max_queue_size = queue_size;
+        worker_running = true;
+        frames_dropped = 0;
+        frames_processed = 0;
+        
+        worker_thread = std::thread(&ModelContext::worker_loop, this);
+        ALOGI("Inference worker started with queue size %d", max_queue_size);
+    }
+    
+    void stop_worker() {
+        if (!worker_running) return;
+        
+        worker_running = false;
+        queue_cv.notify_all();
+        
+        if (worker_thread.joinable()) {
+            worker_thread.join();
+        }
+        
+        // Clear queue
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            std::queue<FrameData> empty;
+            std::swap(frame_queue, empty);
+        }
+        
+        ALOGI("Inference worker stopped. Processed: %d, Dropped: %d", 
+              frames_processed.load(), frames_dropped.load());
+    }
+    
+    void worker_loop() {
+        ALOGI("Worker thread started");
+        
+        while (worker_running) {
+            FrameData frame;
+            
+            // Wait for frame
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_cv.wait(lock, [this] { 
+                    return !frame_queue.empty() || !worker_running; 
+                });
+                
+                if (!worker_running && frame_queue.empty()) {
+                    break;
+                }
+                
+                if (!frame_queue.empty()) {
+                    frame = std::move(frame_queue.front());
+                    frame_queue.pop();
+                }
+            }
+            
+            // Process frame
+            if (!frame.y_plane.empty()) {
+                int count = 0;
+                float* results = run_inference_internal(
+                    frame.y_plane.data(),
+                    frame.u_plane.data(),
+                    frame.v_plane.data(),
+                    frame.y_row_stride,
+                    frame.uv_row_stride,
+                    frame.uv_pixel_stride,
+                    frame.img_width,
+                    frame.img_height,
+                    &count
+                );
+                
+                // Update latest results
+                {
+                    std::lock_guard<std::mutex> lock(results_mutex);
+                    latest_results.count = count;
+                    latest_results.timestamp_ms = frame.timestamp_ms;
+                    
+                    if (results && count > 0) {
+                        latest_results.boxes.assign(results, results + (count * 6));
+                        delete[] results;
+                    } else {
+                        latest_results.boxes.clear();
+                    }
+                }
+                
+                frames_processed++;
+            }
+        }
+        
+        ALOGI("Worker thread exiting");
+    }
+    
+    float* run_inference_internal(
+        const uint8_t* y_plane, const uint8_t* u_plane, const uint8_t* v_plane,
+        int y_row_stride, int uv_row_stride, int uv_pixel_stride,
+        int img_w, int img_h,
+        int* out_count);
 };
 
 void* init_model(const char* model_path) {
@@ -80,41 +271,102 @@ void set_frame_skip(void* context, int skip_mode, int skip_count) {
     
     ctx->skip_mode = skip_mode;
     ctx->skip_count = skip_count > 0 ? skip_count : 1;
-    ctx->frame_counter = 0; // Reset counter when mode changes
+    ctx->frame_counter = 0;
     
     ALOGI("Frame skip mode set to: %d, skip_count: %d", skip_mode, skip_count);
 }
 
 int should_process_frame(void* context) {
-    if (!context) return 1; // Process by default
+    if (!context) return 1;
     ModelContext* ctx = static_cast<ModelContext*>(context);
     
     bool should_process = false;
     
     switch (ctx->skip_mode) {
-        case 0: // No skip - process every frame
+        case 0:
             should_process = true;
             break;
-            
-        case 1: // Skip every 2nd frame (process frame 0, 2, 4, 6...)
+        case 1:
             should_process = (ctx->frame_counter % 2 == 0);
             break;
-            
-        case 2: // Skip N consecutive frames
-            // Process frame, then skip N frames, then process again
-            // Example: skip_count=2 -> process 0, skip 1,2, process 3, skip 4,5, process 6...
+        case 2:
             should_process = (ctx->frame_counter % (ctx->skip_count + 1) == 0);
             break;
-            
         default:
             should_process = true;
             break;
     }
     
     ctx->frame_counter++;
-    
     return should_process ? 1 : 0;
 }
+
+// ============ Producer-Consumer API ============
+
+void start_inference_worker(void* context, int max_queue_size) {
+    if (!context) return;
+    ModelContext* ctx = static_cast<ModelContext*>(context);
+    ctx->start_worker(max_queue_size);
+}
+
+void stop_inference_worker(void* context) {
+    if (!context) return;
+    ModelContext* ctx = static_cast<ModelContext*>(context);
+    ctx->stop_worker();
+}
+
+int push_frame_to_queue(void* context,
+                        const uint8_t* y_plane, const uint8_t* u_plane, const uint8_t* v_plane,
+                        int y_row_stride, int uv_row_stride, int uv_pixel_stride,
+                        int img_width, int img_height) {
+    if (!context) return 0;
+    ModelContext* ctx = static_cast<ModelContext*>(context);
+    
+    if (!ctx->worker_running) {
+        ALOGE("Worker not running - call start_inference_worker first");
+        return 0;
+    }
+    
+    std::lock_guard<std::mutex> lock(ctx->queue_mutex);
+    
+    // Drop frame if queue is full
+    if ((int)ctx->frame_queue.size() >= ctx->max_queue_size) {
+        ctx->frames_dropped++;
+        return 0; // Queue full
+    }
+    
+    // Create and push frame
+    ctx->frame_queue.emplace(
+        y_plane, u_plane, v_plane,
+        y_row_stride, uv_row_stride, uv_pixel_stride,
+        img_width, img_height
+    );
+    
+    ctx->queue_cv.notify_one();
+    return 1; // Success
+}
+
+const float* get_latest_results(void* context, int* out_count, int64_t* out_timestamp) {
+    if (!context) {
+        *out_count = 0;
+        *out_timestamp = 0;
+        return nullptr;
+    }
+    
+    ModelContext* ctx = static_cast<ModelContext*>(context);
+    std::lock_guard<std::mutex> lock(ctx->results_mutex);
+    
+    *out_count = ctx->latest_results.count;
+    *out_timestamp = ctx->latest_results.timestamp_ms;
+    
+    if (ctx->latest_results.boxes.empty()) {
+        return nullptr;
+    }
+    
+    return ctx->latest_results.boxes.data();
+}
+
+// ============ Preprocessing ============
 
 void preprocess_yuv(const uint8_t* y_plane, const uint8_t* u_plane, const uint8_t* v_plane,
                     int y_row_stride, int uv_row_stride, int uv_pixel_stride,
@@ -127,7 +379,6 @@ void preprocess_yuv(const uint8_t* y_plane, const uint8_t* u_plane, const uint8_
     float* g_plane = out_tensor + channel_stride;
     float* b_plane = out_tensor + 2 * channel_stride;
 
-    // Fill with gray (114.0/255.0) for letterbox padding
     std::fill_n(r_plane, channel_stride, 114.0f / 255.0f);
     std::fill_n(g_plane, channel_stride, 114.0f / 255.0f);
     std::fill_n(b_plane, channel_stride, 114.0f / 255.0f);
@@ -144,17 +395,14 @@ void preprocess_yuv(const uint8_t* y_plane, const uint8_t* u_plane, const uint8_
     pad_x = (out_w - new_w) / 2.0f;
     pad_y = (out_h - new_h) / 2.0f;
 
-    // Resize with CORRECT YUV to RGB conversion + Rotation + Letterboxing
     for(int dy = 0; dy < new_h; dy++) {
         for(int dx = 0; dx < new_w; dx++) {
-            // Map to logical image coords
             int logical_x = dx / scale;
             int logical_y = dy / scale;
 
-            // Map to original source image coords
             int sx, sy;
             if (rotate_90) {
-                sx = logical_y; // 90 degree clockwise
+                sx = logical_y;
                 sy = src_h - 1 - logical_x;
             } else {
                 sx = logical_x;
@@ -164,30 +412,25 @@ void preprocess_yuv(const uint8_t* y_plane, const uint8_t* u_plane, const uint8_
             sx = std::max(0, std::min(sx, src_w - 1));
             sy = std::max(0, std::min(sy, src_h - 1));
 
-            // Read raw YUV values
             int y_raw = y_plane[sy * y_row_stride + sx];
             int uv_idx = (sy / 2) * uv_row_stride + (sx / 2) * uv_pixel_stride;
             int u_raw = u_plane[uv_idx];
             int v_raw = v_plane[uv_idx];
 
-            // Scale from LIMITED range to FULL range
             float y = (y_raw - 16.0f) * 255.0f / 219.0f;
             float u = (u_raw - 128.0f) * 255.0f / 224.0f;
             float v = (v_raw - 128.0f) * 255.0f / 224.0f;
 
-            // BT.601 YUV to RGB conversion
             float r = y + 1.402f * v;
             float g = y - 0.344136f * u - 0.714136f * v;
             float b = y + 1.772f * u;
 
-            // Clamp to [0, 255]
             r = std::max(0.0f, std::min(255.0f, r));
             g = std::max(0.0f, std::min(255.0f, g));
             b = std::max(0.0f, std::min(255.0f, b));
 
             size_t out_idx = (dy + (int)pad_y) * out_w + (dx + (int)pad_x);
             
-            // YOLO normalization (0-1)
             r_plane[out_idx] = r / 255.0f;
             g_plane[out_idx] = g / 255.0f;
             b_plane[out_idx] = b / 255.0f;
@@ -211,16 +454,15 @@ static float iou(const float* a, const float* b) {
     return inter_area / (a_area + b_area - inter_area + 1e-6);
 }
 
-float* run_inference_yuv(void* context, 
-                         const uint8_t* y_plane, const uint8_t* u_plane, const uint8_t* v_plane,
-                         int y_row_stride, int uv_row_stride, int uv_pixel_stride,
-                         int img_w, int img_h, 
-                         int* out_count) {
+float* ModelContext::run_inference_internal(
+    const uint8_t* y_plane, const uint8_t* u_plane, const uint8_t* v_plane,
+    int y_row_stride, int uv_row_stride, int uv_pixel_stride,
+    int img_w, int img_h,
+    int* out_count) {
+    
     *out_count = 0;
-    if (!context) return nullptr;
-    ModelContext* ctx = static_cast<ModelContext*>(context);
 
-    std::vector<float> input_tensor_values(1 * 3 * ctx->input_width * ctx->input_height);
+    std::vector<float> input_tensor_values(1 * 3 * input_width * input_height);
     
     bool rotate_90 = (img_w > img_h);
     float scale, pad_x, pad_y;
@@ -228,18 +470,20 @@ float* run_inference_yuv(void* context,
     preprocess_yuv(y_plane, u_plane, v_plane, 
                    y_row_stride, uv_row_stride, uv_pixel_stride, 
                    img_w, img_h, 
-                   input_tensor_values.data(), ctx->input_width, ctx->input_height,
+                   input_tensor_values.data(), input_width, input_height,
                    rotate_90, scale, pad_x, pad_y);
 
     auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_tensor_values.data(), input_tensor_values.size(), ctx->input_node_dims.data(), ctx->input_node_dims.size());
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_tensor_values.data(), input_tensor_values.size(), 
+        input_node_dims.data(), input_node_dims.size());
 
-    const char* input_names[] = {ctx->input_name_str.c_str()};
-    const char* output_names[] = {ctx->output_name_str.c_str()};
+    const char* input_names[] = {input_name_str.c_str()};
+    const char* output_names[] = {output_name_str.c_str()};
 
     std::vector<Ort::Value> output_tensors;
     try {
-        output_tensors = ctx->session.Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
+        output_tensors = session.Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
     } catch(const std::exception& e) {
         ALOGE("Inference error: %s", e.what());
         return nullptr;
@@ -266,11 +510,9 @@ float* run_inference_yuv(void* context,
         k_elements = dim2;
     }
 
-    // Heuristically determine YOLOv5 vs YOLOv8
-    // YOLOv5 COCO output is 85, YOLOv8 COCO is 84
     bool has_objectness = false;
     if (k_elements == 85 || (k_elements > 4 && k_elements != 6 && k_elements != 84 && k_elements % 5 == 0)) { 
-        has_objectness = true; // Likely YOLOv5
+        has_objectness = true;
     }
 
     float conf_thresh = 0.25f;
@@ -315,12 +557,11 @@ float* run_inference_yuv(void* context,
             float box_w = w;
             float box_h = h;
             
-            // Remove letterbox padding and scaling
-            if (x <= 2.0f && y <= 2.0f && w <= 2.0f && h <= 2.0f) { // If model outputs normalized
-                box_x *= ctx->input_width;
-                box_y *= ctx->input_height;
-                box_w *= ctx->input_width;
-                box_h *= ctx->input_height;
+            if (x <= 2.0f && y <= 2.0f && w <= 2.0f && h <= 2.0f) {
+                box_x *= input_width;
+                box_y *= input_height;
+                box_w *= input_width;
+                box_h *= input_height;
             }
             
             box_x = (box_x - pad_x) / scale;
@@ -328,7 +569,6 @@ float* run_inference_yuv(void* context,
             box_w = box_w / scale;
             box_h = box_h / scale;
 
-            // Normalize relative to the logical orientation the image is currently in
             float nx = box_x / logical_w;
             float ny = box_y / logical_h;
             float nw = box_w / logical_w;
@@ -348,7 +588,7 @@ float* run_inference_yuv(void* context,
     for (const auto& box : valid_boxes) {
         bool keep = true;
         for (const auto& f_box : final_boxes) {
-            if (box[5] == f_box[5]) { // Same class
+            if (box[5] == f_box[5]) {
                 if (iou(box.data(), f_box.data()) > nms_thresh) {
                     keep = false;
                     break;
@@ -374,6 +614,23 @@ float* run_inference_yuv(void* context,
     }
 
     return result_array;
+}
+
+// Legacy synchronous API
+float* run_inference_yuv(void* context, 
+                         const uint8_t* y_plane, const uint8_t* u_plane, const uint8_t* v_plane,
+                         int y_row_stride, int uv_row_stride, int uv_pixel_stride,
+                         int img_w, int img_h, 
+                         int* out_count) {
+    *out_count = 0;
+    if (!context) return nullptr;
+    ModelContext* ctx = static_cast<ModelContext*>(context);
+    
+    return ctx->run_inference_internal(
+        y_plane, u_plane, v_plane,
+        y_row_stride, uv_row_stride, uv_pixel_stride,
+        img_w, img_h, out_count
+    );
 }
 
 void free_results(float* results) {

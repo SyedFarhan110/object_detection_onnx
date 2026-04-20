@@ -4,9 +4,8 @@ import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:object_detection_app/services/ffi_bridge.dart';
+import 'package:object_detection_app/services/inference_bridge.dart';
 import 'package:object_detection_app/main.dart';
-import 'package:object_detection_app/widgets/bbox_painter.dart';
 import 'package:path_provider/path_provider.dart';
 
 enum FrameSkipMode {
@@ -30,18 +29,20 @@ class ObjectDetectionScreen extends StatefulWidget {
 class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
     with TickerProviderStateMixin {
   CameraController? _controller;
-  bool _isDetecting = false;
   bool _isModelLoaded = false;
   List<Map<String, dynamic>> _results = [];
-  List<Map<String, dynamic>> _lastValidResults = [];
   List<String> _labels = [];
   final InferenceBridge _bridge = InferenceBridge();
   Size _imageSize = Size.zero;
   double _fps = 0.0;
   double _inferenceFps = 0.0;
   int _frameCount = 0;
-  int _inferenceCount = 0;
   DateTime? _fpsTimer;
+
+  // Producer-Consumer stats
+  int _framesPushed = 0;
+  int _framesDropped = 0;
+  int _queueSize = 2; // Recommended: 2-3 for smooth operation
 
   // Frame skip settings
   FrameSkipMode _selectedSkipMode = FrameSkipMode.noSkip;
@@ -116,7 +117,16 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
         setState(() {
           _isModelLoaded = true;
         });
+
+        // Start the background inference worker with Producer-Consumer pattern
+        _bridge.startInferenceWorker(maxQueueSize: _queueSize);
         debugPrint("ONNX Model loaded successfully!");
+        debugPrint(
+          "Background inference worker started with queue size: $_queueSize",
+        );
+
+        // Start periodic UI updates at 60 FPS
+        _startResultsPolling();
       } else {
         debugPrint("Failed to load ONNX Model!");
       }
@@ -138,148 +148,164 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
       if (!mounted) return;
       setState(() {});
 
-      _controller!.startImageStream((CameraImage image) {
-        if (_isDetecting || !_isModelLoaded) return;
-        _isDetecting = true;
-        _runInference(image);
-      });
+      // Start camera stream - this is the PRODUCER
+      // Frames are pushed to the queue without blocking
+      _controller!.startImageStream(_onCameraFrame);
+
+      debugPrint("Camera initialized and streaming started");
     } catch (e) {
       debugPrint("Camera Error: $e");
     }
   }
 
-  Future<void> _runInference(CameraImage image) async {
-    if (image.planes.length != 3) {
-      _isDetecting = false;
+  /// PRODUCER: Called by camera for each frame
+  /// This runs on the camera thread and must be VERY fast
+  void _onCameraFrame(CameraImage image) {
+    if (!_isModelLoaded || !_bridge.isWorkerRunning) {
       return;
     }
 
-    try {
-      _frameCount++;
-
-      _fpsTimer ??= DateTime.now();
-      final elapsed = DateTime.now().difference(_fpsTimer!).inMilliseconds;
-
-      final yPlane = image.planes[0].bytes;
-      final uPlane = image.planes[1].bytes;
-      final vPlane = image.planes[2].bytes;
-
-      final shouldProcess = _bridge.shouldProcessFrame();
-
-      List<Map<String, dynamic>> mappedResults;
-
-      if (shouldProcess) {
-        _inferenceCount++;
-
-        final results = _bridge.runInference(
-          yPlane,
-          uPlane,
-          vPlane,
-          image.planes[0].bytesPerRow,
-          image.planes[1].bytesPerRow,
-          image.planes[1].bytesPerPixel ?? 1,
-          image.width,
-          image.height,
-        );
-
-        if (!mounted) return;
-
-        final bool isRotatedToPortrait = image.width > image.height;
-        final int logicalImageWidth = isRotatedToPortrait
-            ? image.height
-            : image.width;
-        final int logicalImageHeight = isRotatedToPortrait
-            ? image.width
-            : image.height;
-
-        mappedResults = results.map((result) {
-          final className = result.classId < _labels.length
-              ? _labels[result.classId]
-              : result.classId.toString();
-
-          final centerX = result.x * logicalImageWidth;
-          final centerY = result.y * logicalImageHeight;
-          final boxWidth = result.w * logicalImageWidth;
-          final boxHeight = result.h * logicalImageHeight;
-
-          final x1 = (centerX - (boxWidth / 2)).clamp(
-            0.0,
-            logicalImageWidth.toDouble(),
-          );
-          final y1 = (centerY - (boxHeight / 2)).clamp(
-            0.0,
-            logicalImageHeight.toDouble(),
-          );
-          final x2 = (centerX + (boxWidth / 2)).clamp(
-            0.0,
-            logicalImageWidth.toDouble(),
-          );
-          final y2 = (centerY + (boxHeight / 2)).clamp(
-            0.0,
-            logicalImageHeight.toDouble(),
-          );
-
-          return <String, dynamic>{
-            'x1': x1,
-            'y1': y1,
-            'x2': x2,
-            'y2': y2,
-            'class': className,
-            'confidence': result.confidence,
-          };
-        }).toList();
-
-        _lastValidResults = mappedResults;
-
-        if (results.isNotEmpty) {
-          final detectedNames = results
-              .map((r) {
-                String cName = r.classId.toString();
-                if (r.classId < _labels.length) cName = _labels[r.classId];
-                return '$cName(${(r.confidence * 100).toStringAsFixed(1)}%)';
-              })
-              .join(', ');
-          debugPrint('Detected: $detectedNames');
-        }
-      } else {
-        mappedResults = _lastValidResults;
-      }
-
-      if (elapsed >= 1000) {
-        setState(() {
-          _fps = _frameCount * 1000 / elapsed;
-          _inferenceFps = _inferenceCount * 1000 / elapsed;
-        });
-
-        _frameCount = 0;
-        _inferenceCount = 0;
-        _fpsTimer = DateTime.now();
-      }
-
-      setState(() {
-        _results = mappedResults;
-
-        final bool isRotatedToPortrait = image.width > image.height;
-        final int logicalImageWidth = isRotatedToPortrait
-            ? image.height
-            : image.width;
-        final int logicalImageHeight = isRotatedToPortrait
-            ? image.width
-            : image.height;
-
-        _imageSize = Size(
-          logicalImageWidth.toDouble(),
-          logicalImageHeight.toDouble(),
-        );
-      });
-    } catch (e) {
-      debugPrint("Inference Error: $e");
-    } finally {
-      if (_selectedSkipMode == FrameSkipMode.noSkip) {
-        await Future.delayed(const Duration(milliseconds: 30));
-      }
-      _isDetecting = false;
+    if (image.planes.length != 3) {
+      return;
     }
+    // Update image size for bbox rendering  
+    if (_imageSize.width <= 0) {
+      setState(() {
+        _imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      });
+    // Removed extra closing brace
+    }
+
+    _frameCount++;
+
+    // Calculate FPS
+    _fpsTimer ??= DateTime.now();
+    final elapsed = DateTime.now().difference(_fpsTimer!).inMilliseconds;
+    if (elapsed >= 1000) {
+      setState(() {
+        _fps = _frameCount * 1000 / elapsed;
+      });
+      _frameCount = 0;
+      _fpsTimer = DateTime.now();
+    }
+
+    // Push frame to queue (non-blocking, very fast)
+    final success = _bridge.pushFrame(
+      image.planes[0].bytes, // Y plane
+      image.planes[1].bytes, // U plane
+      image.planes[2].bytes, // V plane
+      image.planes[0].bytesPerRow,
+      image.planes[1].bytesPerRow,
+      image.planes[1].bytesPerPixel ?? 1,
+      image.width,
+      image.height,
+    );
+
+    if (success) {
+      _framesPushed++;
+    } else {
+      _framesDropped++;
+      // Frame dropped because queue is full
+      // This is OK - inference is slower than camera
+      // UI will still be smooth using latest results
+    }
+  }
+
+  /// CONSUMER: Periodically fetch latest results and update UI
+  /// Runs at 60 FPS for smooth UI, independent of inference speed
+  void _startResultsPolling() {
+    String? lastResultsHash;
+    int inferenceCount = 0;
+    DateTime? inferenceTimer;
+
+    Stream.periodic(const Duration(milliseconds: 16)).listen((_) {
+      if (!mounted || !_isModelLoaded || !_bridge.isWorkerRunning) return;
+
+      // Get latest results (non-blocking, very fast)
+      final results = _bridge.getLatestResults();
+
+      if (results != null) {
+        // Create a simple hash to detect if results changed (new inference)
+        final currentHash =
+            '${results.detections.length}_${results.detections.map((d) => '${d.classId}_${d.confidence.toStringAsFixed(3)}').join('_')}';
+
+        // Check if this is a new inference result
+        if (currentHash != lastResultsHash) {
+          lastResultsHash = currentHash;
+          inferenceCount++;
+
+          // Calculate inference FPS
+          inferenceTimer ??= DateTime.now();
+          final elapsed = DateTime.now()
+              .difference(inferenceTimer!)
+              .inMilliseconds;
+          if (elapsed >= 1000) {
+            final fps = inferenceCount * 1000 / elapsed;
+            setState(() {
+              _inferenceFps = fps;
+            });
+            inferenceCount = 0;
+            inferenceTimer = DateTime.now();
+          }
+        }
+
+        if (results.detections.isNotEmpty) {
+          // Map raw results to UI format
+          final mappedResults = results.detections.map((result) {
+            final className = result.classId < _labels.length
+                ? _labels[result.classId]
+                : result.classId.toString();
+
+            // Use current image size or calculate from detection
+            final imageWidth = _imageSize.width > 0 ? _imageSize.width : 640.0;
+            final imageHeight = _imageSize.height > 0 ? _imageSize.height : 480.0;
+
+            // Convert normalized coordinates to pixel coordinates
+            final centerX = result.x * imageWidth;
+            final centerY = result.y * imageHeight;
+            final boxWidth = result.w * imageWidth;
+            final boxHeight = result.h * imageHeight;
+
+            final x1 = (centerX - (boxWidth / 2)).clamp(0.0, imageWidth);
+            final y1 = (centerY - (boxHeight / 2)).clamp(0.0, imageHeight);
+            final x2 = (centerX + (boxWidth / 2)).clamp(0.0, imageWidth);
+            final y2 = (centerY + (boxHeight / 2)).clamp(0.0, imageHeight);
+
+            return <String, dynamic>{
+              'x1': x1,
+              'y1': y1,
+              'x2': x2,
+              'y2': y2,
+              'class': className,
+              'confidence': result.confidence,
+            };
+          }).toList();
+
+          setState(() {
+            _results = mappedResults;
+          });
+
+          // Debug output for detections (only on new results)
+          if (results.detections.isNotEmpty && currentHash != lastResultsHash) {
+            final detectedNames = results.detections
+                .map((r) {
+                  String cName = r.classId.toString();
+                  if (r.classId < _labels.length) cName = _labels[r.classId];
+                  return '$cName(${(r.confidence * 100).toStringAsFixed(1)}%)';
+                })
+                .join(', ');
+            debugPrint(
+              'Detected: $detectedNames | Inference FPS: ${_inferenceFps.toStringAsFixed(1)}',
+            );
+          }
+        } else {
+          // Empty results - clear detections
+          setState(() {
+            _results = [];
+          });
+        }
+      }
+    });
   }
 
   Future<void> _showSkipCountDialog() async {
@@ -297,7 +323,7 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.blue.withOpacity(0.2),
+                color: Colors.blue.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: const Icon(Icons.tune, color: Colors.blue),
@@ -330,7 +356,7 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.blue.withOpacity(0.5)),
+                  borderSide: BorderSide(color: Colors.blue.withValues(alpha: 0.5)),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -373,6 +399,100 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
     }
   }
 
+  Future<void> _showQueueSizeDialog() async {
+    final TextEditingController controller = TextEditingController(
+      text: _queueSize.toString(),
+    );
+
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.purple.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.queue, color: Colors.purple),
+            ),
+            const SizedBox(width: 12),
+            const Text(
+              'Queue Size Settings',
+              style: TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Set max queue size (2-3 recommended):',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 20),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Queue Size (1-5)',
+                labelStyle: const TextStyle(color: Colors.purple),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Colors.purple),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.purple.withValues(alpha: 0.5)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Colors.purple, width: 2),
+                ),
+                filled: true,
+                fillColor: Colors.grey[850],
+              ),
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.purple,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onPressed: () {
+              final value = int.tryParse(controller.text) ?? 2;
+              Navigator.pop(context, value.clamp(1, 5));
+            },
+            child: const Text('Apply & Restart'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && result != _queueSize) {
+      setState(() {
+        _queueSize = result;
+      });
+      // Restart worker with new queue size
+      _bridge.dispose();
+      _bridge.startInferenceWorker(maxQueueSize: _queueSize);
+      debugPrint("Worker restarted with queue size: $_queueSize");
+    }
+  }
+
   void _onSkipModeChanged(FrameSkipMode? mode) async {
     if (mode == null) return;
 
@@ -389,8 +509,9 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
 
   @override
   void dispose() {
+    _controller?.stopImageStream();
     _controller?.dispose();
-    _bridge.dispose();
+    _bridge.dispose(); // This stops the worker thread
     _pulseController.dispose();
     _statsController.dispose();
     super.dispose();
@@ -415,13 +536,13 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                Colors.white.withOpacity(0.15),
-                Colors.white.withOpacity(0.05),
+                Colors.white.withValues(alpha: 0.15),
+                Colors.white.withValues(alpha: 0.05),
               ],
             ),
             borderRadius: BorderRadius.circular(16),
             border: Border.all(
-              color: Colors.white.withOpacity(0.2),
+              color: Colors.white.withValues(alpha: 0.2),
               width: 1.5,
             ),
           ),
@@ -472,7 +593,6 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
       );
     }
 
-    final size = MediaQuery.of(context).size;
     bool isPortrait =
         MediaQuery.of(context).orientation == Orientation.portrait;
     double cameraAspectRatio = _controller!.value.aspectRatio;
@@ -495,8 +615,8 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                   colors: [
-                    Colors.blue.withOpacity(0.1),
-                    Colors.purple.withOpacity(0.1),
+                    Colors.blue.withValues(alpha: 0.1),
+                    Colors.purple.withValues(alpha: 0.1),
                   ],
                 ),
               ),
@@ -524,7 +644,7 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
                 Text(
-                  'Real-time AI Vision',
+                  'Producer-Consumer Pattern',
                   style: TextStyle(fontSize: 10, color: Colors.white70),
                 ),
               ],
@@ -566,11 +686,19 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                   if (_imageSize.width > 0)
                     CustomPaint(
                       painter: BoundingBoxPainter(
-                        _results,
-                        _imageSize.width.toInt(),
-                        _imageSize.height.toInt(),
-                        size.width,
-                        size.height,
+                        detections: _results
+                            .map(
+                              (result) => DetectionResult(
+                                x1: result['x1'] ?? 0.0,
+                                y1: result['y1'] ?? 0.0,
+                                x2: result['x2'] ?? 0.0,
+                                y2: result['y2'] ?? 0.0,
+                                className: result['class'] ?? 'Unknown',
+                                confidence: result['confidence'] ?? 0.0,
+                              ),
+                            )
+                            .toList(),
+                        imageSize: _imageSize,
                       ),
                     ),
                 ],
@@ -624,8 +752,8 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       _buildStatRow(
-                        icon: Icons.speed,
-                        label: 'FPS',
+                        icon: Icons.videocam,
+                        label: 'Camera',
                         value: _fps.toStringAsFixed(1),
                         color: Colors.green.shade400,
                       ),
@@ -642,6 +770,20 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                         label: 'Objects',
                         value: _results.length.toString(),
                         color: Colors.purple.shade400,
+                      ),
+                      const Divider(color: Colors.white24, height: 20),
+                      _buildStatRow(
+                        icon: Icons.upload,
+                        label: 'Pushed',
+                        value: _framesPushed.toString(),
+                        color: Colors.cyan.shade400,
+                      ),
+                      const SizedBox(height: 8),
+                      _buildStatRow(
+                        icon: Icons.block,
+                        label: 'Dropped',
+                        value: _framesDropped.toString(),
+                        color: Colors.orange.shade400,
                       ),
                     ],
                   ),
@@ -665,7 +807,7 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                         Container(
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: Colors.blue.withOpacity(0.2),
+                            color: Colors.blue.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: const Icon(
@@ -676,16 +818,39 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                         ),
                         const SizedBox(width: 12),
                         const Text(
-                          'Frame Skip Mode',
+                          'Settings',
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
+                        const Spacer(),
+                        IconButton(
+                          icon: const Icon(Icons.queue, color: Colors.purple),
+                          onPressed: _showQueueSizeDialog,
+                          tooltip: 'Queue Size',
+                        ),
                       ],
                     ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Queue Size: $_queueSize',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.7),
+                        fontSize: 12,
+                      ),
+                    ),
                     const SizedBox(height: 16),
+                    const Text(
+                      'Frame Skip Mode',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
                     ...FrameSkipMode.values.map((mode) {
                       final isSelected = _selectedSkipMode == mode;
                       return Padding(
@@ -702,13 +867,13 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                               ),
                               decoration: BoxDecoration(
                                 color: isSelected
-                                    ? Colors.blue.withOpacity(0.3)
-                                    : Colors.white.withOpacity(0.05),
+                                    ? Colors.blue.withValues(alpha: 0.3)
+                                    : Colors.white.withValues(alpha: 0.05),
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
                                   color: isSelected
                                       ? Colors.blue
-                                      : Colors.white.withOpacity(0.1),
+                                      : Colors.white.withValues(alpha: 0.1),
                                   width: 1.5,
                                 ),
                               ),
@@ -828,5 +993,88 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
         ),
       ],
     );
+  }
+}
+
+/// Simple data class to hold detection results
+class DetectionResult {
+  final double x1, y1, x2, y2;
+  final String className;
+  final double confidence;
+
+  DetectionResult({
+    required this.x1,
+    required this.y1,
+    required this.x2,
+    required this.y2,
+    required this.className,
+    required this.confidence,
+  });
+}
+
+/// Custom painter to draw bounding boxes on the camera preview
+class BoundingBoxPainter extends CustomPainter {
+  final List<DetectionResult> detections;
+  final Size imageSize;
+
+  BoundingBoxPainter({required this.detections, required this.imageSize});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (var detection in detections) {
+      // Calculate scaling factors
+      final scaleX = size.width / imageSize.width;
+      final scaleY = size.height / imageSize.height;
+
+      // Draw bounding box
+      final rect = Rect.fromLTRB(
+        detection.x1 * scaleX,
+        detection.y1 * scaleY,
+        detection.x2 * scaleX,
+        detection.y2 * scaleY,
+      );
+
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = Colors.green
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.0,
+      );
+
+      // Draw label background
+      const textStyle = TextStyle(
+        color: Colors.white,
+        fontSize: 12,
+        fontWeight: FontWeight.bold,
+      );
+      final label =
+          '${detection.className} ${(detection.confidence * 100).toStringAsFixed(1)}%';
+      final textPainter = TextPainter(
+        text: TextSpan(text: label, style: textStyle),
+        textDirection: TextDirection.ltr,
+      );
+      textPainter.layout();
+
+      final labelBgRect = Rect.fromLTWH(
+        rect.left,
+        rect.top - 20,
+        textPainter.width + 4,
+        18,
+      );
+
+      canvas.drawRect(
+        labelBgRect,
+        Paint()..color = Colors.green.withValues(alpha: 0.8),
+      );
+
+      // Draw label text
+      textPainter.paint(canvas, Offset(rect.left + 2, rect.top - 18));
+    }
+  }
+
+  @override
+  bool shouldRepaint(BoundingBoxPainter oldDelegate) {
+    return oldDelegate.detections != detections;
   }
 }
