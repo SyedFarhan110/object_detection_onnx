@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:object_detection_app/camera_screen.dart';
-import 'package:object_detection_app/rack_validation_example.dart';
+import 'package:object_detection_app/screens/validation/validation_menu_screen.dart';
 
 List<CameraDescription> cameras = [];
 
@@ -111,7 +111,7 @@ class HomeScreen extends StatelessWidget {
                     context,
                     MaterialPageRoute(
                       builder: (_) =>
-                          RackValidationExample(camera: cameras.first),
+                          ValidationMenuScreen(camera: cameras.first),
                     ),
                   );
                 },

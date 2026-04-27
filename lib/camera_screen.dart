@@ -168,12 +168,12 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
     if (image.planes.length != 3) {
       return;
     }
-    // Update image size for bbox rendering  
+    // Update image size for bbox rendering
     if (_imageSize.width <= 0) {
       setState(() {
         _imageSize = Size(image.width.toDouble(), image.height.toDouble());
       });
-    // Removed extra closing brace
+      // Removed extra closing brace
     }
 
     _frameCount++;
@@ -258,7 +258,9 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
 
             // Use current image size or calculate from detection
             final imageWidth = _imageSize.width > 0 ? _imageSize.width : 640.0;
-            final imageHeight = _imageSize.height > 0 ? _imageSize.height : 480.0;
+            final imageHeight = _imageSize.height > 0
+                ? _imageSize.height
+                : 480.0;
 
             // Convert normalized coordinates to pixel coordinates
             final centerX = result.x * imageWidth;
@@ -356,7 +358,9 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.blue.withValues(alpha: 0.5)),
+                  borderSide: BorderSide(
+                    color: Colors.blue.withValues(alpha: 0.5),
+                  ),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -447,7 +451,9 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.purple.withValues(alpha: 0.5)),
+                  borderSide: BorderSide(
+                    color: Colors.purple.withValues(alpha: 0.5),
+                  ),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
