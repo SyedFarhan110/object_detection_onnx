@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:object_detection_app/services/polygon_storage.dart';
@@ -17,6 +19,7 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
   CameraController? _cameraController;
   List<Point2D> _points = [];
   bool _isComplete = false;
+  XFile? _capturedFile;
 
   @override
   void initState() {
@@ -36,6 +39,26 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
   void dispose() {
     _cameraController?.dispose();
     super.dispose();
+  }
+
+  Future<void> _captureFrame() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+    try {
+      final XFile file = await _cameraController!.takePicture();
+      setState(() {
+        _capturedFile = file;
+      });
+    } catch (e) {
+      debugPrint('Capture error: $e');
+    }
+  }
+
+  void _retakeCapture() {
+    setState(() {
+      _capturedFile = null;
+      _points.clear();
+      _isComplete = false;
+    });
   }
 
   void _showSaveDialog() {
@@ -108,8 +131,14 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                   );
                   return;
                 }
+                if (_capturedFile == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Please capture a frame before saving')),
+                  );
+                  return;
+                }
                 try {
-                  await PolygonStorage.savePolygon(name, _points);
+                  await PolygonStorage.savePolygon(name, _points, imagePath: _capturedFile?.path);
                   if (mounted) {
                     Navigator.pop(context); // Close dialog
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -167,6 +196,12 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            icon: Icon(_capturedFile == null ? Icons.camera_alt : Icons.refresh_outlined),
+            tooltip: _capturedFile == null ? 'Capture frame' : 'Retake',
+            onPressed: _capturedFile == null ? _captureFrame : _retakeCapture,
+          ),
+          const SizedBox(width: 4),
           if (_points.length >= 3 && !_isComplete)...[
             Container(
               margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
@@ -205,7 +240,14 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                   _points.add(Point2D(details.localPosition.dx, details.localPosition.dy));
                 });
               },
-              child: CameraPreview(_cameraController!)
+              child: _capturedFile == null
+                  ? CameraPreview(_cameraController!)
+                  : Image.file(
+                      File(_capturedFile!.path),
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      height: double.infinity,
+                    ),
             )
           else
             Container(

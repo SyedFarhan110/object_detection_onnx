@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 
@@ -33,11 +34,14 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
   List<Map<String, dynamic>> _results = [];
   List<String> _labels = [];
   final InferenceBridge _bridge = InferenceBridge();
+  final StreamController<List<DetectionResult>> _detectionStreamController =
+      StreamController<List<DetectionResult>>.broadcast();
   Size _imageSize = Size.zero;
   double _fps = 0.0;
   double _inferenceFps = 0.0;
   int _frameCount = 0;
   DateTime? _fpsTimer;
+  Timer? _resultsPollingTimer;
 
   // Producer-Consumer stats
   int _framesPushed = 0;
@@ -218,7 +222,8 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
     int inferenceCount = 0;
     DateTime? inferenceTimer;
 
-    Stream.periodic(const Duration(milliseconds: 16)).listen((_) {
+    _resultsPollingTimer?.cancel();
+    _resultsPollingTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
       if (!mounted || !_isModelLoaded || !_bridge.isWorkerRunning) return;
 
       // Get latest results (non-blocking, very fast)
@@ -287,6 +292,23 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
             _results = mappedResults;
           });
 
+          if (!_detectionStreamController.isClosed) {
+            _detectionStreamController.add(
+              mappedResults
+                  .map(
+                    (result) => DetectionResult(
+                      x1: result['x1'] ?? 0.0,
+                      y1: result['y1'] ?? 0.0,
+                      x2: result['x2'] ?? 0.0,
+                      y2: result['y2'] ?? 0.0,
+                      className: result['class'] ?? 'Unknown',
+                      confidence: result['confidence'] ?? 0.0,
+                    ),
+                  )
+                  .toList(),
+            );
+          }
+
           // Debug output for detections (only on new results)
           if (results.detections.isNotEmpty && currentHash != lastResultsHash) {
             final detectedNames = results.detections
@@ -305,6 +327,10 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
           setState(() {
             _results = [];
           });
+
+          if (!_detectionStreamController.isClosed) {
+            _detectionStreamController.add(const []);
+          }
         }
       }
     });
@@ -515,6 +541,8 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
 
   @override
   void dispose() {
+    _resultsPollingTimer?.cancel();
+    _detectionStreamController.close();
     _controller?.stopImageStream();
     _controller?.dispose();
     _bridge.dispose(); // This stops the worker thread
@@ -690,22 +718,29 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
                 children: [
                   CameraPreview(_controller!),
                   if (_imageSize.width > 0)
-                    CustomPaint(
-                      painter: BoundingBoxPainter(
-                        detections: _results
-                            .map(
-                              (result) => DetectionResult(
-                                x1: result['x1'] ?? 0.0,
-                                y1: result['y1'] ?? 0.0,
-                                x2: result['x2'] ?? 0.0,
-                                y2: result['y2'] ?? 0.0,
-                                className: result['class'] ?? 'Unknown',
-                                confidence: result['confidence'] ?? 0.0,
-                              ),
-                            )
-                            .toList(),
-                        imageSize: _imageSize,
-                      ),
+                    StreamBuilder<List<DetectionResult>>(
+                      stream: _detectionStreamController.stream,
+                      initialData: _results
+                          .map(
+                            (result) => DetectionResult(
+                              x1: result['x1'] ?? 0.0,
+                              y1: result['y1'] ?? 0.0,
+                              x2: result['x2'] ?? 0.0,
+                              y2: result['y2'] ?? 0.0,
+                              className: result['class'] ?? 'Unknown',
+                              confidence: result['confidence'] ?? 0.0,
+                            ),
+                          )
+                          .toList(),
+                      builder: (context, snapshot) {
+                        final detections = snapshot.data ?? const [];
+                        return CustomPaint(
+                          painter: BoundingBoxPainter(
+                            detections: detections,
+                            imageSize: _imageSize,
+                          ),
+                        );
+                      },
                     ),
                 ],
               ),
@@ -929,46 +964,67 @@ class _ObjectDetectionScreenState extends State<ObjectDetectionScreen>
             ),
 
           // Detection Count Badge
-          if (_isModelLoaded && _results.isNotEmpty)
-            Positioned(
-              top: 100,
-              left: 16,
-              child: _buildGlassmorphicContainer(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 8,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade400,
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.green.shade400,
-                            blurRadius: 8,
-                            spreadRadius: 2,
-                          ),
-                        ],
+          StreamBuilder<List<DetectionResult>>(
+            stream: _detectionStreamController.stream,
+            initialData: _results
+                .map(
+                  (result) => DetectionResult(
+                    x1: result['x1'] ?? 0.0,
+                    y1: result['y1'] ?? 0.0,
+                    x2: result['x2'] ?? 0.0,
+                    y2: result['y2'] ?? 0.0,
+                    className: result['class'] ?? 'Unknown',
+                    confidence: result['confidence'] ?? 0.0,
+                  ),
+                )
+                .toList(),
+            builder: (context, snapshot) {
+              final detections = snapshot.data ?? const [];
+              if (!_isModelLoaded || detections.isEmpty) {
+                return const SizedBox.shrink();
+              }
+
+              return Positioned(
+                top: 100,
+                left: 16,
+                child: _buildGlassmorphicContainer(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade400,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.green.shade400,
+                              blurRadius: 8,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${_results.length} detected',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
+                      const SizedBox(width: 8),
+                      Text(
+                        '${detections.length} detected',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
+          ),
         ],
       ),
     );

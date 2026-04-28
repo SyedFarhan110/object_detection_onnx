@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:object_detection_app/services/polygon_storage.dart';
@@ -209,24 +211,41 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
               padding: const EdgeInsets.all(16),
               child: Row(
                 children: [
-                  // Icon Container
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          Theme.of(context).primaryColor,
-                          Theme.of(context).primaryColor.withOpacity(0.7),
-                        ],
+                  // Thumbnail or placeholder
+                  Builder(builder: (context) {
+                    final imagePath = polyData['imagePath'] as String?;
+                    if (imagePath != null && File(imagePath).existsSync()) {
+                      return Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          image: DecorationImage(
+                            image: FileImage(File(imagePath)),
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      );
+                    }
+
+                    return Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            Theme.of(context).primaryColor,
+                            Theme.of(context).primaryColor.withOpacity(0.7),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.crop_free,
-                      color: Colors.white,
-                      size: 28,
-                    ),
-                  ),
+                      child: const Icon(
+                        Icons.crop_free,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                    );
+                  }),
                   const SizedBox(width: 16),
                   
                   // Content
@@ -273,18 +292,18 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
                   // Actions
                   Row(
                     mainAxisSize: MainAxisSize.min,
-                    // children: [
-                    //   IconButton(
-                    //     icon: Icon(Icons.delete_outline, color: Colors.red[400]),
-                    //     onPressed: () => _deletePolygon(index),
-                    //     tooltip: 'Delete',
-                    //   ),
-                    //   Icon(
-                    //     Icons.arrow_forward_ios,
-                    //     color: Colors.grey[400],
-                    //     size: 20,
-                    //   ),
-                    // ],
+                    children: [
+                      IconButton(
+                        icon: Icon(Icons.delete_outline, color: Colors.red[400]),
+                        onPressed: () => _deletePolygon(index),
+                        tooltip: 'Delete',
+                      ),
+                      Icon(
+                        Icons.arrow_forward_ios,
+                        color: Colors.grey[400],
+                        size: 20,
+                      ),
+                    ],
                   ),
                 ],
               ),
