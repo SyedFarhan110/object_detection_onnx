@@ -9,7 +9,8 @@ import 'validation_capture_screen.dart';
 class CachedPolygonsScreen extends StatefulWidget {
   final CameraDescription camera;
 
-  const CachedPolygonsScreen({Key? key, required this.camera}) : super(key: key);
+  const CachedPolygonsScreen({Key? key, required this.camera})
+    : super(key: key);
 
   @override
   State<CachedPolygonsScreen> createState() => _CachedPolygonsScreenState();
@@ -56,7 +57,9 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
@@ -82,7 +85,9 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
             ),
             backgroundColor: Colors.red,
             behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
         );
       }
@@ -101,32 +106,34 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
           if (_polygons.isNotEmpty)
             TextButton.icon(
               icon: const Icon(Icons.info_outline),
-              label: Text('${_polygons.length} frame${_polygons.length > 1 ? 's' : ''}'),
-              onPressed: null,
-              style: TextButton.styleFrom(
-                foregroundColor: Colors.white70,
+              label: Text(
+                '${_polygons.length} frame${_polygons.length > 1 ? 's' : ''}',
               ),
+              onPressed: null,
+              style: TextButton.styleFrom(foregroundColor: Colors.white70),
             ),
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _polygons.isEmpty 
-              ? _buildEmptyState()
-              : RefreshIndicator(
-                  onRefresh: _loadPolygons,
-                  child: ListView.builder(
-                      padding: const EdgeInsets.all(16),
-                      itemCount: _polygons.length,
-                      itemBuilder: (context, index) {
-                        final polyData = _polygons[index];
-                        final rawPoints = polyData['points'] as List;
-                        final points = rawPoints.map((p) => Point2D(p['x'], p['y'])).toList();
-                        
-                        return _buildPolygonCard(polyData, points, index);
-                      },
-                    ),
-                ),
+          : _polygons.isEmpty
+          ? _buildEmptyState()
+          : RefreshIndicator(
+              onRefresh: _loadPolygons,
+              child: ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: _polygons.length,
+                itemBuilder: (context, index) {
+                  final polyData = _polygons[index];
+                  final rawPoints = polyData['points'] as List;
+                  final points = rawPoints
+                      .map((p) => Point2D(p['x'], p['y']))
+                      .toList();
+
+                  return _buildPolygonCard(polyData, points, index);
+                },
+              ),
+            ),
     );
   }
 
@@ -135,11 +142,7 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(
-            Icons.crop_free,
-            size: 80,
-            color: Colors.grey[300],
-          ),
+          Icon(Icons.crop_free, size: 80, color: Colors.grey[300]),
           const SizedBox(height: 24),
           Text(
             'No validation frames',
@@ -152,10 +155,7 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
           const SizedBox(height: 12),
           Text(
             'Create a new polygon to get started',
-            style: TextStyle(
-              fontSize: 16,
-              color: Colors.grey[500],
-            ),
+            style: TextStyle(fontSize: 16, color: Colors.grey[500]),
           ),
           const SizedBox(height: 32),
           ElevatedButton.icon(
@@ -163,7 +163,9 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
             label: const Text('Draw New Polygon'),
             style: ElevatedButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
             onPressed: () => Navigator.pop(context),
           ),
@@ -172,7 +174,11 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
     );
   }
 
-  Widget _buildPolygonCard(Map<String, dynamic> polyData, List<Point2D> points, int index) {
+  Widget _buildPolygonCard(
+    Map<String, dynamic> polyData,
+    List<Point2D> points,
+    int index,
+  ) {
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       child: Material(
@@ -180,12 +186,12 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
         child: InkWell(
           onTap: () {
             Navigator.push(
-              context, 
+              context,
               MaterialPageRoute(
                 builder: (_) => ValidationCaptureScreen(
-                  camera: widget.camera, 
-                  polygonName: polyData['name'], 
-                  points: points
+                  camera: widget.camera,
+                  polygonName: polyData['name'],
+                  points: points,
                 ),
               ),
             );
@@ -202,52 +208,51 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
                   offset: const Offset(0, 4),
                 ),
               ],
-              border: Border.all(
-                color: Colors.grey[200]!,
-                width: 1,
-              ),
+              border: Border.all(color: Colors.grey[200]!, width: 1),
             ),
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Row(
                 children: [
                   // Thumbnail or placeholder
-                  Builder(builder: (context) {
-                    final imagePath = polyData['imagePath'] as String?;
-                    if (imagePath != null && File(imagePath).existsSync()) {
-                      return Container(
-                        width: 72,
-                        height: 72,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(12),
-                          image: DecorationImage(
-                            image: FileImage(File(imagePath)),
-                            fit: BoxFit.cover,
+                  Builder(
+                    builder: (context) {
+                      final imagePath = polyData['imagePath'] as String?;
+                      if (imagePath != null && File(imagePath).existsSync()) {
+                        return Container(
+                          width: 72,
+                          height: 72,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            image: DecorationImage(
+                              image: FileImage(File(imagePath)),
+                              fit: BoxFit.cover,
+                            ),
                           ),
+                        );
+                      }
+
+                      return Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              Theme.of(context).primaryColor,
+                              Theme.of(context).primaryColor.withOpacity(0.7),
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.crop_free,
+                          color: Colors.white,
+                          size: 28,
                         ),
                       );
-                    }
-
-                    return Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            Theme.of(context).primaryColor,
-                            Theme.of(context).primaryColor.withOpacity(0.7),
-                          ],
-                        ),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(
-                        Icons.crop_free,
-                        color: Colors.white,
-                        size: 28,
-                      ),
-                    );
-                  }),
+                    },
+                  ),
                   const SizedBox(width: 16),
-                  
+
                   // Content
                   Expanded(
                     child: Column(
@@ -264,7 +269,11 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            Icon(Icons.pin_drop, size: 16, color: Colors.grey[600]),
+                            Icon(
+                              Icons.pin_drop,
+                              size: 16,
+                              color: Colors.grey[600],
+                            ),
                             const SizedBox(width: 6),
                             Text(
                               '${points.length} points',
@@ -274,7 +283,11 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
                               ),
                             ),
                             const SizedBox(width: 16),
-                            Icon(Icons.access_time, size: 16, color: Colors.grey[600]),
+                            Icon(
+                              Icons.access_time,
+                              size: 16,
+                              color: Colors.grey[600],
+                            ),
                             const SizedBox(width: 6),
                             Text(
                               'Ready',
@@ -288,13 +301,16 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
                       ],
                     ),
                   ),
-                  
+
                   // Actions
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       IconButton(
-                        icon: Icon(Icons.delete_outline, color: Colors.red[400]),
+                        icon: Icon(
+                          Icons.delete_outline,
+                          color: Colors.red[400],
+                        ),
                         onPressed: () => _deletePolygon(index),
                         tooltip: 'Delete',
                       ),

@@ -9,7 +9,8 @@ import 'package:object_detection_app/widgets/polygon_painter.dart';
 class PolygonDrawingScreen extends StatefulWidget {
   final CameraDescription camera;
 
-  const PolygonDrawingScreen({Key? key, required this.camera}) : super(key: key);
+  const PolygonDrawingScreen({Key? key, required this.camera})
+    : super(key: key);
 
   @override
   State<PolygonDrawingScreen> createState() => _PolygonDrawingScreenState();
@@ -25,9 +26,9 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
   void initState() {
     super.initState();
     _cameraController = CameraController(
-      widget.camera, 
-      ResolutionPreset.high, 
-      enableAudio: false
+      widget.camera,
+      ResolutionPreset.high,
+      enableAudio: false,
     );
     _cameraController!.initialize().then((_) {
       if (!mounted) return;
@@ -42,7 +43,8 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
   }
 
   Future<void> _captureFrame() async {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+    if (_cameraController == null || !_cameraController!.value.isInitialized)
+      return;
     try {
       final XFile file = await _cameraController!.takePicture();
       setState(() {
@@ -67,7 +69,9 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
       context: context,
       builder: (context) {
         return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
           title: Row(
             children: [
               Icon(Icons.save, color: Theme.of(context).primaryColor),
@@ -115,13 +119,18 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context), 
+              onPressed: () => Navigator.pop(context),
               child: const Text('Cancel'),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
               ),
               onPressed: () async {
                 final name = nameController.text.trim();
@@ -133,12 +142,18 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                 }
                 if (_capturedFile == null) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Please capture a frame before saving')),
+                    const SnackBar(
+                      content: Text('Please capture a frame before saving'),
+                    ),
                   );
                   return;
                 }
                 try {
-                  await PolygonStorage.savePolygon(name, _points, imagePath: _capturedFile?.path);
+                  await PolygonStorage.savePolygon(
+                    name,
+                    _points,
+                    imagePath: _capturedFile?.path,
+                  );
                   if (mounted) {
                     Navigator.pop(context); // Close dialog
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -152,7 +167,9 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                         ),
                         backgroundColor: Colors.green,
                         behavior: SnackBarBehavior.floating,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
                     );
                     Navigator.pop(context); // Go back to menu
@@ -166,12 +183,12 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                     ),
                   );
                 }
-              }, 
+              },
               child: const Text('Save'),
-            )
+            ),
           ],
         );
-      }
+      },
     );
   }
 
@@ -197,12 +214,14 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
         ),
         actions: [
           IconButton(
-            icon: Icon(_capturedFile == null ? Icons.camera_alt : Icons.refresh_outlined),
+            icon: Icon(
+              _capturedFile == null ? Icons.camera_alt : Icons.refresh_outlined,
+            ),
             tooltip: _capturedFile == null ? 'Capture frame' : 'Retake',
             onPressed: _capturedFile == null ? _captureFrame : _retakeCapture,
           ),
           const SizedBox(width: 4),
-          if (_points.length >= 3 && !_isComplete)...[
+          if (_points.length >= 3 && !_isComplete) ...[
             Container(
               margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
               child: ElevatedButton.icon(
@@ -211,7 +230,9 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.green,
                   foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                 ),
                 onPressed: () => setState(() => _isComplete = true),
               ),
@@ -233,13 +254,21 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          if (_cameraController != null && _cameraController!.value.isInitialized)
+          if (_cameraController != null &&
+              _cameraController!.value.isInitialized)
             GestureDetector(
-              onTapDown: _isComplete ? null : (details) {
-                setState(() {
-                  _points.add(Point2D(details.localPosition.dx, details.localPosition.dy));
-                });
-              },
+              onTapDown: _isComplete
+                  ? null
+                  : (details) {
+                      setState(() {
+                        _points.add(
+                          Point2D(
+                            details.localPosition.dx,
+                            details.localPosition.dy,
+                          ),
+                        );
+                      });
+                    },
               child: _capturedFile == null
                   ? CameraPreview(_cameraController!)
                   : Image.file(
@@ -252,16 +281,21 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
           else
             Container(
               color: Colors.black,
-              child: const Center(child: CircularProgressIndicator(color: Colors.white)),
+              child: const Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              ),
             ),
-          
+
           if (_points.isNotEmpty)
             IgnorePointer(
               child: CustomPaint(
-                painter: PolygonPainter(points: _points, isComplete: _isComplete),
+                painter: PolygonPainter(
+                  points: _points,
+                  isComplete: _isComplete,
+                ),
               ),
             ),
-          
+
           // Instructions overlay
           if (!_isComplete && _points.isEmpty)
             Positioned(
@@ -290,24 +324,24 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                     SizedBox(height: 8),
                     Text(
                       'Add at least 3 points to create a polygon',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                      ),
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
                       textAlign: TextAlign.center,
                     ),
                   ],
                 ),
               ),
             ),
-          
+
           // Point counter
           if (_points.isNotEmpty && !_isComplete)
             Positioned(
               top: 100,
               left: 20,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.black.withOpacity(0.7),
                   borderRadius: BorderRadius.circular(12),
@@ -329,7 +363,7 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                 ),
               ),
             ),
-            
+
           if (_isComplete)
             Positioned(
               bottom: 0,
@@ -341,10 +375,7 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.transparent,
-                      Colors.black.withOpacity(0.8),
-                    ],
+                    colors: [Colors.transparent, Colors.black.withOpacity(0.8)],
                   ),
                 ),
                 child: SafeArea(
@@ -360,7 +391,11 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.check_circle, color: Colors.green, size: 24),
+                            const Icon(
+                              Icons.check_circle,
+                              color: Colors.green,
+                              size: 24,
+                            ),
                             const SizedBox(width: 12),
                             Expanded(
                               child: Text(
@@ -382,7 +417,10 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                           icon: const Icon(Icons.save, size: 24),
                           label: const Text(
                             'Save Polygon',
-                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                           style: ElevatedButton.styleFrom(
                             padding: const EdgeInsets.symmetric(vertical: 18),
@@ -397,9 +435,9 @@ class _PolygonDrawingScreenState extends State<PolygonDrawingScreen> {
                   ),
                 ),
               ),
-            )
+            ),
         ],
-      )
+      ),
     );
   }
 }

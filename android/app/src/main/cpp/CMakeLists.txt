@@ -29,3 +29,10 @@ add_library(polygon_validator SHARED
 
 # Link polygon_validator with Android log
 target_link_libraries(polygon_validator ${log-lib})
+
+# CV Detector library (rule-based detector)
+add_library(cv_detector SHARED 
+    cv_detector.cpp
+)
+
+target_link_libraries(cv_detector ${log-lib})

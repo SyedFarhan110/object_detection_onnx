@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:object_detection_app/services/inference_bridge.dart';
+import 'package:object_detection_app/services/cv_bridge.dart';
 import 'package:object_detection_app/services/polygon_validator_bridge.dart';
 import 'package:object_detection_app/widgets/polygon_painter.dart';
 
@@ -12,19 +13,22 @@ class ValidationCaptureScreen extends StatefulWidget {
   final List<Point2D> points;
 
   const ValidationCaptureScreen({
-    Key? key, 
-    required this.camera, 
+    Key? key,
+    required this.camera,
     required this.polygonName,
-    required this.points
+    required this.points,
   }) : super(key: key);
 
   @override
-  State<ValidationCaptureScreen> createState() => _ValidationCaptureScreenState();
+  State<ValidationCaptureScreen> createState() =>
+      _ValidationCaptureScreenState();
 }
 
-class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with SingleTickerProviderStateMixin {
+class _ValidationCaptureScreenState extends State<ValidationCaptureScreen>
+    with SingleTickerProviderStateMixin {
   CameraController? _cameraController;
   late InferenceBridge _inferenceBridge;
+  late CvBridge _cvBridge;
   late PolygonValidatorBridge _polygonValidator;
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -32,13 +36,15 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
   bool _isProcessing = false;
   ValidationStatus? _status;
   static const int _rackClassId = 0;
+  bool _useMl = true; // toggle: true=ML, false=CV
 
   @override
   void initState() {
     super.initState();
     _inferenceBridge = InferenceBridge();
+    _cvBridge = CvBridge();
     _polygonValidator = PolygonValidatorBridge();
-    
+
     _polygonValidator.setPolygon(widget.points);
     _polygonValidator.setValidationThreshold(1.0);
 
@@ -46,7 +52,7 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
       duration: const Duration(milliseconds: 1500),
       vsync: this,
     )..repeat(reverse: true);
-    
+
     _pulseAnimation = Tween<double>(begin: 1.0, end: 1.1).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
@@ -62,13 +68,13 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
     _inferenceBridge.loadModel(tempFile.path);
 
     _cameraController = CameraController(
-      widget.camera, 
-      ResolutionPreset.high, 
-      enableAudio: false, 
-      imageFormatGroup: ImageFormatGroup.yuv420
+      widget.camera,
+      ResolutionPreset.high,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await _cameraController!.initialize();
-    
+
     if (mounted) setState(() {});
   }
 
@@ -77,6 +83,7 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
     _pulseController.dispose();
     _cameraController?.dispose();
     _inferenceBridge.dispose();
+    _cvBridge.dispose();
     _polygonValidator.dispose();
     super.dispose();
   }
@@ -106,16 +113,27 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
       final uPlane = image.planes[1].bytes;
       final vPlane = image.planes[2].bytes;
 
-      final detections = _inferenceBridge.runInference(
-        yPlane,
-        uPlane,
-        vPlane,
-        image.planes[0].bytesPerRow,
-        image.planes[1].bytesPerRow,
-        image.planes[1].bytesPerPixel ?? 1,
-        image.width,
-        image.height,
-      );
+      final detections = _useMl
+          ? _inferenceBridge.runInference(
+              yPlane,
+              uPlane,
+              vPlane,
+              image.planes[0].bytesPerRow,
+              image.planes[1].bytesPerRow,
+              image.planes[1].bytesPerPixel ?? 1,
+              image.width,
+              image.height,
+            )
+          : _cvBridge.runSync(
+              yPlane,
+              uPlane,
+              vPlane,
+              image.planes[0].bytesPerRow,
+              image.planes[1].bytesPerRow,
+              image.planes[1].bytesPerPixel ?? 1,
+              image.width,
+              image.height,
+            );
 
       DetectionResult? bestDetection;
       for (final detection in detections) {
@@ -153,13 +171,14 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
               ),
               backgroundColor: Colors.orange,
               behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
           );
         }
       }
-
-    } catch(e) {
+    } catch (e) {
       debugPrint("Frame processing error: $e");
     } finally {
       if (mounted) setState(() => _isProcessing = false);
@@ -206,6 +225,23 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
             ),
           ],
         ),
+        actions: [
+          Row(
+            children: [
+              const Text('ML', style: TextStyle(fontSize: 12)),
+              Switch(
+                value: _useMl,
+                onChanged: (v) {
+                  setState(() {
+                    _useMl = v;
+                  });
+                },
+              ),
+              const Text('CV', style: TextStyle(fontSize: 12)),
+              const SizedBox(width: 8),
+            ],
+          ),
+        ],
         iconTheme: const IconThemeData(
           shadows: [
             Shadow(
@@ -220,14 +256,17 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
         fit: StackFit.expand,
         children: [
           // Camera Preview
-          if (_cameraController != null && _cameraController!.value.isInitialized)
+          if (_cameraController != null &&
+              _cameraController!.value.isInitialized)
             CameraPreview(_cameraController!)
           else
             Container(
               color: Colors.black,
-              child: const Center(child: CircularProgressIndicator(color: Colors.white)),
+              child: const Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              ),
             ),
-          
+
           // Polygon Overlay
           CustomPaint(
             painter: PolygonPainter(points: widget.points, isComplete: true),
@@ -247,20 +286,23 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                   padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
-                      colors: _status == ValidationStatus.fullyInside 
-                        ? [Colors.green[700]!, Colors.green[500]!]
-                        : _status == ValidationStatus.partiallyInside
+                      colors: _status == ValidationStatus.fullyInside
+                          ? [Colors.green[700]!, Colors.green[500]!]
+                          : _status == ValidationStatus.partiallyInside
                           ? [Colors.orange[700]!, Colors.orange[500]!]
                           : [Colors.red[700]!, Colors.red[500]!],
                     ),
                     borderRadius: BorderRadius.circular(16),
                     boxShadow: [
                       BoxShadow(
-                        color: (_status == ValidationStatus.fullyInside 
-                          ? Colors.green 
-                          : _status == ValidationStatus.partiallyInside
-                            ? Colors.orange
-                            : Colors.red).withOpacity(0.4),
+                        color:
+                            (_status == ValidationStatus.fullyInside
+                                    ? Colors.green
+                                    : _status ==
+                                          ValidationStatus.partiallyInside
+                                    ? Colors.orange
+                                    : Colors.red)
+                                .withOpacity(0.4),
                         blurRadius: 20,
                         offset: const Offset(0, 8),
                       ),
@@ -269,9 +311,9 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                   child: Column(
                     children: [
                       Icon(
-                        _status == ValidationStatus.fullyInside 
-                          ? Icons.check_circle
-                          : _status == ValidationStatus.partiallyInside
+                        _status == ValidationStatus.fullyInside
+                            ? Icons.check_circle
+                            : _status == ValidationStatus.partiallyInside
                             ? Icons.warning
                             : Icons.cancel,
                         color: Colors.white,
@@ -279,14 +321,14 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        _status == ValidationStatus.fullyInside 
-                          ? 'RACK INSIDE POLYGON' 
-                          : (_status == ValidationStatus.partiallyInside 
-                            ? 'RACK PARTIALLY INSIDE' 
-                            : 'RACK OUTSIDE POLYGON'),
+                        _status == ValidationStatus.fullyInside
+                            ? 'RACK INSIDE POLYGON'
+                            : (_status == ValidationStatus.partiallyInside
+                                  ? 'RACK PARTIALLY INSIDE'
+                                  : 'RACK OUTSIDE POLYGON'),
                         style: const TextStyle(
-                          color: Colors.white, 
-                          fontSize: 20, 
+                          color: Colors.white,
+                          fontSize: 20,
                           fontWeight: FontWeight.bold,
                           letterSpacing: 1.2,
                         ),
@@ -294,11 +336,11 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        _status == ValidationStatus.fullyInside 
-                          ? 'Position verified ✓' 
-                          : 'Adjust rack position',
+                        _status == ValidationStatus.fullyInside
+                            ? 'Position verified ✓'
+                            : 'Adjust rack position',
                         style: const TextStyle(
-                          color: Colors.white70, 
+                          color: Colors.white70,
                           fontSize: 14,
                         ),
                         textAlign: TextAlign.center,
@@ -324,7 +366,11 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                 ),
                 child: const Column(
                   children: [
-                    Icon(Icons.center_focus_strong, color: Colors.white, size: 32),
+                    Icon(
+                      Icons.center_focus_strong,
+                      color: Colors.white,
+                      size: 32,
+                    ),
                     SizedBox(height: 8),
                     Text(
                       'Position rack within the polygon',
@@ -338,10 +384,7 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                     SizedBox(height: 4),
                     Text(
                       'Tap capture when ready',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                      ),
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -360,66 +403,75 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen> with 
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.transparent,
-                    Colors.black.withOpacity(0.8),
-                  ],
+                  colors: [Colors.transparent, Colors.black.withOpacity(0.8)],
                 ),
               ),
               child: SafeArea(
                 top: false,
                 child: ScaleTransition(
-                  scale: _isProcessing ? _pulseAnimation : const AlwaysStoppedAnimation(1.0),
+                  scale: _isProcessing
+                      ? _pulseAnimation
+                      : const AlwaysStoppedAnimation(1.0),
                   child: SizedBox(
                     width: double.infinity,
                     height: 65,
                     child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: _isProcessing ? Colors.grey : Theme.of(context).primaryColor,
+                        backgroundColor: _isProcessing
+                            ? Colors.grey
+                            : Theme.of(context).primaryColor,
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(16),
                         ),
                         elevation: 8,
-                        shadowColor: Theme.of(context).primaryColor.withOpacity(0.5),
+                        shadowColor: Theme.of(
+                          context,
+                        ).primaryColor.withOpacity(0.5),
                       ),
                       onPressed: _isProcessing ? null : _captureAndValidate,
-                      child: _isProcessing 
-                        ? const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              SizedBox(
-                                width: 24,
-                                height: 24,
-                                child: CircularProgressIndicator(
-                                  color: Colors.white,
-                                  strokeWidth: 3,
+                      child: _isProcessing
+                          ? const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    color: Colors.white,
+                                    strokeWidth: 3,
+                                  ),
                                 ),
-                              ),
-                              SizedBox(width: 16),
-                              Text(
-                                'Processing...',
-                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                              ),
-                            ],
-                          )
-                        : const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.camera_alt, size: 28),
-                              SizedBox(width: 12),
-                              Text(
-                                'Capture & Validate',
-                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                              ),
-                            ],
-                          ),
+                                SizedBox(width: 16),
+                                Text(
+                                  'Processing...',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            )
+                          : const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.camera_alt, size: 28),
+                                SizedBox(width: 12),
+                                Text(
+                                  'Capture & Validate',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
                     ),
                   ),
                 ),
               ),
             ),
-          )
+          ),
         ],
       ),
     );
