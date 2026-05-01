@@ -35,8 +35,6 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen>
 
   bool _isProcessing = false;
   ValidationStatus? _status;
-  static const int _rackClassId = 0;
-  bool _useMl = true; // toggle: true=ML, false=CV
 
   @override
   void initState() {
@@ -96,9 +94,41 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen>
       _status = null;
     });
 
+    bool frameReceived = false;
+
+    // Fallback timeout in case the camera plugin deadlocks and never delivers a frame
+    Future.delayed(const Duration(seconds: 3), () async {
+      if (mounted && !frameReceived && _isProcessing) {
+        debugPrint('Camera frame timeout. Resetting state.');
+        try {
+          if (_cameraController?.value.isStreamingImages ?? false) {
+            await _cameraController!.stopImageStream();
+          }
+        } catch (_) {}
+        if (mounted) setState(() => _isProcessing = false);
+      }
+    });
+
     try {
+      if (_cameraController!.value.isStreamingImages) {
+        await _cameraController!.stopImageStream();
+      }
+
       _cameraController!.startImageStream((CameraImage camImage) {
-        _cameraController!.stopImageStream();
+        if (frameReceived) return;
+        frameReceived = true;
+
+        // Stop stream outside of the immediate callback to avoid deadlocks
+        Future.microtask(() async {
+          try {
+            if (_cameraController?.value.isStreamingImages ?? false) {
+              await _cameraController!.stopImageStream();
+            }
+          } catch (e) {
+            debugPrint('Error stopping stream: $e');
+          }
+        });
+
         _processFrame(camImage);
       });
     } catch (e) {
@@ -107,36 +137,41 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen>
     }
   }
 
+  static const int _rackClassId = 1; // 0 for product, 1 for Rack
+
   void _processFrame(CameraImage image) {
     try {
       final yPlane = image.planes[0].bytes;
       final uPlane = image.planes[1].bytes;
       final vPlane = image.planes[2].bytes;
 
-      final detections = _useMl
-          ? _inferenceBridge.runInference(
-              yPlane,
-              uPlane,
-              vPlane,
-              image.planes[0].bytesPerRow,
-              image.planes[1].bytesPerRow,
-              image.planes[1].bytesPerPixel ?? 1,
-              image.width,
-              image.height,
-            )
-          : _cvBridge.runSync(
-              yPlane,
-              uPlane,
-              vPlane,
-              image.planes[0].bytesPerRow,
-              image.planes[1].bytesPerRow,
-              image.planes[1].bytesPerPixel ?? 1,
-              image.width,
-              image.height,
-            );
+      // 1. Product Detection (ML)
+      final products = _inferenceBridge.runInference(
+        yPlane,
+        uPlane,
+        vPlane,
+        image.planes[0].bytesPerRow,
+        image.planes[1].bytesPerRow,
+        image.planes[1].bytesPerPixel ?? 1,
+        image.width,
+        image.height,
+      );
+
+      // 2. Structural extraction & Embedding pipeline (CV)
+      final rackDetections = _cvBridge.runPipelineSync(
+        yPlane,
+        uPlane,
+        vPlane,
+        image.planes[0].bytesPerRow,
+        image.planes[1].bytesPerRow,
+        image.planes[1].bytesPerPixel ?? 1,
+        image.width,
+        image.height,
+        products,
+      );
 
       DetectionResult? bestDetection;
-      for (final detection in detections) {
+      for (final detection in rackDetections) {
         if (detection.classId == _rackClassId) {
           bestDetection = detection;
           break;
@@ -226,21 +261,7 @@ class _ValidationCaptureScreenState extends State<ValidationCaptureScreen>
           ],
         ),
         actions: [
-          Row(
-            children: [
-              const Text('ML', style: TextStyle(fontSize: 12)),
-              Switch(
-                value: _useMl,
-                onChanged: (v) {
-                  setState(() {
-                    _useMl = v;
-                  });
-                },
-              ),
-              const Text('CV', style: TextStyle(fontSize: 12)),
-              const SizedBox(width: 8),
-            ],
-          ),
+          // The ML/CV toggle has been removed as the pipeline now combines both.
         ],
         iconTheme: const IconThemeData(
           shadows: [

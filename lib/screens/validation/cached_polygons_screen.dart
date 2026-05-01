@@ -70,6 +70,7 @@ class _CachedPolygonsScreenState extends State<CachedPolygonsScreen> {
 
     if (confirmed == true) {
       // Implement delete functionality
+      await PolygonStorage.deletePolygon(polygonName);
       setState(() {
         _polygons.removeAt(index);
       });

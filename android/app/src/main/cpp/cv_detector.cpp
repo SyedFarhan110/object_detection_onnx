@@ -15,6 +15,7 @@ struct CVContext {
     float vertical_edge_thresh = 5.0f;
     int min_shelves = 2;
     bool use_adaptive_threshold = true;
+    std::vector<float> reference_embedding;
 };
 
 extern "C" {
@@ -34,6 +35,13 @@ void free_cv_detector(void* ctx) {
     if (!ctx) return;
     ALOGI("free_cv_detector: freeing context %p", ctx);
     delete static_cast<CVContext*>(ctx);
+}
+
+void set_reference_embedding(void* ctx, const float* emb, int size) {
+    if (!ctx || !emb || size <= 0) return;
+    CVContext* c = static_cast<CVContext*>(ctx);
+    c->reference_embedding.assign(emb, emb + size);
+    ALOGI("set_reference_embedding: set %d features", size);
 }
 
 // Non-maximum suppression helper
@@ -324,6 +332,162 @@ float* run_cv_detector_yuv(void* ctx,
 
     ALOGI("run_cv_detector_yuv: ✓✓✓ RACK DETECTED ✓✓✓ x=%.3f y=%.3f w=%.3f h=%.3f conf=%.3f", 
           nx, ny, nw, nh, score);
+
+    return res;
+}
+
+// Pipeline: Mask products -> Extract structure -> Compare embedding
+float* run_cv_pipeline_yuv(void* ctx,
+                           const uint8_t* y_plane, const uint8_t* /*u_plane*/, const uint8_t* /*v_plane*/,
+                           int y_row_stride, int /*uv_row_stride*/, int /*uv_pixel_stride*/,
+                           int img_w, int img_h,
+                           const float* product_boxes, int num_products,
+                           int* out_count) {
+    if (!ctx || !y_plane || img_w <= 0 || img_h <= 0 || !out_count) {
+        if (out_count) *out_count = 0;
+        return nullptr;
+    }
+
+    CVContext* c = static_cast<CVContext*>(ctx);
+    ALOGI("run_cv_pipeline_yuv: START w=%d h=%d products=%d", img_w, img_h, num_products);
+
+    // 1. Mask products (remove pixels)
+    std::vector<uint8_t> masked_y(img_h * img_w);
+    for (int r = 0; r < img_h; ++r) {
+        for (int col = 0; col < img_w; ++col) {
+            masked_y[r * img_w + col] = y_plane[r * y_row_stride + col];
+        }
+    }
+
+    for (int i = 0; i < num_products; i++) {
+        float px = product_boxes[i * 6 + 0];
+        float py = product_boxes[i * 6 + 1];
+        float pw = product_boxes[i * 6 + 2];
+        float ph = product_boxes[i * 6 + 3];
+
+        int left = std::max(0, (int)((px - pw / 2.0f) * img_w));
+        int right = std::min(img_w - 1, (int)((px + pw / 2.0f) * img_w));
+        int top = std::max(0, (int)((py - ph / 2.0f) * img_h));
+        int bottom = std::min(img_h - 1, (int)((py + ph / 2.0f) * img_h));
+
+        for (int r = top; r <= bottom; ++r) {
+            for (int col = left; col <= right; ++col) {
+                masked_y[r * img_w + col] = 128; // Mask with gray or 0
+            }
+        }
+    }
+
+    // 2. Structural extraction (edges / lines) on masked image
+    std::vector<float> row_strength(img_h, 0.0f);
+    for (int r = 0; r < img_h; ++r) {
+        float acc = 0.0f;
+        for (int x = 1; x < img_w; ++x) {
+            acc += std::abs((int)masked_y[r * img_w + x] - (int)masked_y[r * img_w + x - 1]);
+        }
+        row_strength[r] = acc / (float)img_w;
+    }
+
+    std::vector<float> col_strength(img_w, 0.0f);
+    for (int x = 0; x < img_w; ++x) {
+        float acc = 0.0f;
+        for (int r = 1; r < img_h; ++r) {
+            acc += std::abs((int)masked_y[r * img_w + x] - (int)masked_y[(r - 1) * img_w + x]);
+        }
+        col_strength[x] = acc / (float)img_h;
+    }
+
+    float h_thresh = c->horizontal_edge_thresh;
+    float v_thresh = c->vertical_edge_thresh;
+    
+    if (c->use_adaptive_threshold) {
+        std::vector<float> row_s = row_strength;
+        std::vector<float> col_s = col_strength;
+        std::sort(row_s.begin(), row_s.end());
+        std::sort(col_s.begin(), col_s.end());
+        h_thresh = std::max(6.0f, row_s[(size_t)(row_s.size() * 0.75f)] * 0.9f);
+        v_thresh = std::max(6.0f, col_s[(size_t)(col_s.size() * 0.75f)] * 0.9f);
+    }
+
+    std::vector<int> horiz_lines_raw;
+    for (int r = 2; r < img_h - 2; ++r) {
+        if (row_strength[r] > h_thresh && row_strength[r] >= row_strength[r-1] && row_strength[r] >= row_strength[r+1]) {
+            horiz_lines_raw.push_back(r);
+        }
+    }
+    std::vector<int> horiz_lines = apply_nms(horiz_lines_raw, row_strength, 15);
+
+    std::vector<int> vert_lines_raw;
+    for (int x = 2; x < img_w - 2; ++x) {
+        if (col_strength[x] > v_thresh && col_strength[x] >= col_strength[x-1] && col_strength[x] >= col_strength[x+1]) {
+            vert_lines_raw.push_back(x);
+        }
+    }
+    std::vector<int> vert_lines = apply_nms(vert_lines_raw, col_strength, 15);
+
+    if (horiz_lines.size() < 2 || vert_lines.size() < 2) {
+        *out_count = 0;
+        return nullptr;
+    }
+
+    // 3. Embedding model (Generate structural features)
+    // Create a 4-dimensional embedding: [num_horiz_lines, num_vert_lines, avg_h_spacing, avg_v_spacing]
+    float avg_h_spacing = 0;
+    if (horiz_lines.size() > 1) {
+        avg_h_spacing = (float)(horiz_lines.back() - horiz_lines.front()) / (horiz_lines.size() - 1);
+    }
+    float avg_v_spacing = 0;
+    if (vert_lines.size() > 1) {
+        avg_v_spacing = (float)(vert_lines.back() - vert_lines.front()) / (vert_lines.size() - 1);
+    }
+
+    std::vector<float> current_embedding = {
+        (float)horiz_lines.size(),
+        (float)vert_lines.size(),
+        avg_h_spacing / img_h,
+        avg_v_spacing / img_w
+    };
+
+    // 4. Comparison with reference rack
+    float similarity = 1.0f; // Default if no reference
+    if (!c->reference_embedding.empty() && c->reference_embedding.size() == current_embedding.size()) {
+        // Compute Euclidean distance or similarity
+        float dist = 0.0f;
+        for (size_t i = 0; i < current_embedding.size(); ++i) {
+            float d = current_embedding[i] - c->reference_embedding[i];
+            dist += d * d;
+        }
+        similarity = std::exp(-std::sqrt(dist)); // Convert distance to [0, 1] score
+        ALOGI("run_cv_pipeline_yuv: Similarity with reference rack = %.3f", similarity);
+    }
+
+    // Compute bounding box
+    int left = vert_lines.front();
+    int right = vert_lines.back();
+    int top = horiz_lines.front();
+    int bottom = horiz_lines.back();
+
+    int pad_x = std::min(20, img_w / 20);
+    int pad_y = std::min(20, img_h / 20);
+    left = std::max(0, left - pad_x);
+    right = std::min(img_w - 1, right + pad_x);
+    top = std::max(0, top - pad_y);
+    bottom = std::min(img_h - 1, bottom + pad_y);
+
+    float cx = (left + right) / 2.0f;
+    float cy = (top + bottom) / 2.0f;
+    float bw = (right - left);
+    float bh = (bottom - top);
+
+    float score = 0.5f + (similarity * 0.5f); // Combine structure confidence with similarity
+
+    *out_count = 1;
+    float* res = new float[6];
+    res[0] = cx / img_w;
+    res[1] = cy / img_h;
+    res[2] = bw / img_w;
+    res[3] = bh / img_h;
+    res[4] = score; 
+    res[5] = 1.0f; // class id = 1 (Rack)
 
     return res;
 }

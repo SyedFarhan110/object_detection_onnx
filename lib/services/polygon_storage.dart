@@ -37,4 +37,17 @@ class PolygonStorage {
         .map((p) => json.decode(p) as Map<String, dynamic>)
         .toList();
   }
+
+  static Future<void> deletePolygon(String name) async {
+    final prefs = await SharedPreferences.getInstance();
+    List<String> polygonsStr = prefs.getStringList(_key) ?? [];
+    
+    // Filter out the polygon with the matching name
+    polygonsStr.removeWhere((p) {
+      final data = json.decode(p) as Map<String, dynamic>;
+      return data['name'] == name;
+    });
+
+    await prefs.setStringList(_key, polygonsStr);
+  }
 }
